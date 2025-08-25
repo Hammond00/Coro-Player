@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Portale Coro Multibrani</title>
+<style>
+:root {
+  --bg:#0f172a; --panel:#0b1224; --muted:#334155; --acc:#22d3ee;
+  --text:#e5e7eb; --sub:#94a3b8; --active:#22c55e; --paused:#ef4444;
+}
+body { margin:0; background:var(--bg); color:var(--text); font-family:sans-serif; }
+.wrap { max-width:960px; margin:24px auto; padding:16px; }
+.card { background:var(--panel); border-radius:16px; padding:16px; }
+h1 { font-size:22px; margin-bottom:12px; }
+button,label { cursor:pointer; border-radius:12px; border:1px solid var(--sub); padding:6px 12px; background:#0b1530; color:var(--text); }
+button.primary { background:var(--acc); color:#04212a; font-weight:700; }
+.toolbar { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-bottom:12px; }
+.group { display:flex; gap:6px; align-items:center; background:var(--panel); border:1px solid var(--sub); padding:6px 8px; border-radius:12px; }
+input[type=range]{ width:100%; }
+.track { display:grid; grid-template-columns:20px 1fr 100px auto 1fr; gap:8px; align-items:center; padding:8px; border-radius:12px; background:#0c1a33; border:1px solid rgba(148,163,184,.12); }
+.track .muted { opacity:0.5; }
+.track .led { width:12px; height:12px; border-radius:50%; background:#334155; }
+.progress { height:16px; background:#334155; border-radius:8px; overflow:hidden; }
+.progress>span { display:block; height:100%; background: linear-gradient(90deg,#22d3ee,#60a5fa); width:0%; }
+.waveform { height:20px; background:#1e293b; border-radius:8px; margin-top:8px; position:relative; cursor:pointer; }
+.wave-progress { position:absolute; left:0; top:0; height:100%; width:0; background:rgba(34,211,238,.5); border-radius:8px; }
+.wave-handle { width:16px; height:16px; border-radius:50%; background:var(--acc); position:absolute; top:50%; transform:translate(-50%,-50%); cursor:pointer; }
+.time-display { text-align:right; font-size:12px; margin-top:4px; color:var(--sub); }
+.small{ font-size:12px; color:var(--sub); }
+</style>
+<script src="https://unpkg.com/tone@14.8.49/build/Tone.js"></script>
+</head>
+<body>
+<div class="wrap">
+  <div class="card">
+    <h1>🎶 Portale Coro Multibrani</h1>
+    <div>
+      <label for="folder">📁 Seleziona cartella (uno o più file audio)</label>
+      <input id="folder" type="file" webkitdirectory directory multiple style="display:none">
+      <div class="toolbar">
+        <div class="group">
+          <button id="play" class="primary">▶︎ Play</button>
+          <button id="pause">⏸︎ Pausa</button>
+          <button id="stop">⏹︎ Stop</button>
+          <button id="back5">⏪ -5s</button>
+          <button id="fwd5">⏩ +5s</button>
+        </div>
+        <div class="group">
+          <span class="small">Tempo %</span>
+          <input id="tempo" type="range" min="25" max="250" step="1" value="100" />
+          <span id="tempoVal" class="small">100%</span>
+          <button id="tempoReset">Reset</button>
+        </div>
+        <div class="group">
+          <span class="small">Intonazione (sem.)</span>
+          <input id="pitch" type="range" min="-12" max="12" step="0.1" value="0" />
+          <span id="pitchVal" class="small">0</span>
+          <button id="pitchReset">Reset</button>
+        </div>
+      </div>
+      <div id="tracks"></div>
+      <div class="waveform">
+        <div class="wave-progress"></div>
+        <div class="wave-handle"></div>
+      </div>
+      <div class="time-display"><span id="currentTime">0:00</span> / <span id="totalTime">0:00</span></div>
+      <div id="statusHint" class="small">Carica una cartella per iniziare...</div>
+    </div>
+  </div>
+</div>
+
+<script>
+// Variabili globali
+const tracksEl=document.getElementById('tracks');
+const folderEl=document.getElementById('folder');
+const playBtn=document.getElementById('play');
+const pauseBtn=document.getElementById('pause');
+const stopBtn=document.getElementById('stop');
+const back5Btn=document.getElementById('back5');
+const fwd5Btn=document.getElementById('fwd5');
+const tempoEl=document.getElementById('tempo');
+const tempoValEl=document.getElementById('tempoVal');
+const tempoResetBtn=document.getElementById('tempoReset');
+const pitchEl=document.getElementById('pitch');
+const pitchValEl=document.getElementById('pitchVal');
+const pitchResetBtn=document.getElementById('pitchReset');
+const statusHint=document.getElementById('statusHint');
+const waveProgress=document.querySelector('.wave-progress');
+const waveHandle=document.querySelector('.wave-handle');
+const currentTimeEl=document.getElementById('currentTime');
+const totalTimeEl=document.getElementById('totalTime');
+
+let tracks=[],isReady=false,duration=0,startTime=0,pausedTime=0,rafId,isPlaying=false;
+
+// Funzioni helper
+function formatTime(sec){ const m=Math.floor(sec/60); const s=Math.floor(sec%60); return `${m}:${s.toString().padStart(2,'0')}`; }
+
+// Costruisci UI tracce
+function buildTrackUI(name,t){
+    const row=document.createElement('div'); row.className='track';
+    row.innerHTML=`
+      <div class="led"></div>
+      <div class="name">${name}</div>
+      <input type="range" min="0" max="1" step="0.01" value="0.9"/>
+      <label><input type="checkbox" checked/> attiva</label>
+      <div class="progress"><span></span></div>
+    `;
+    const vol=row.querySelector('input[type=range]');
+    const chk=row.querySelector('input[type=checkbox]');
+    const prog=row.querySelector('.progress > span');
+    const led=row.querySelector('.led');
+    vol.addEventListener('input',()=>t.gain.gain.rampTo(Number(vol.value),0.05));
+    chk.addEventListener('change',()=>{
+        t.gain.mute=!chk.checked;
+        row.classList.toggle('muted',!chk.checked);
+    });
+    t.progressEl=prog;
+    t.row=row;
+    t.led=led;
+    tracksEl.appendChild(row);
+}
+
+// Carica cartella
+folderEl.addEventListener('change', async (e)=>{
+    if(!e.target.files.length) return;
+    tracksEl.innerHTML=''; tracks=[]; let loadedCount=0;
+    const files=Array.from(e.target.files).filter(f=>/\.(mp3|wav|ogg|m4a)$/i.test(f.name));
+    if(!files.length){ alert('Nessun file audio valido trovato'); return; }
+
+    files.forEach(f=>{
+        const url=URL.createObjectURL(f);
+        const gain=new Tone.Gain(0.9).toDestination();
+        const t={name:f.name, player:null, gain, progressEl:null, row:null, led:null};
+        buildTrackUI(f.name,t);
+        const player=new Tone.Player({
+            url, autostart:false, onload:()=>{
+                t.progressEl.style.width='100%';
+                loadedCount++;
+                if(loadedCount===files.length){
+                    isReady=true;
+                    duration=Math.max(...tracks.map(t=>t.player.buffer.duration));
+                    totalTimeEl.textContent=formatTime(duration);
+                    statusHint.textContent='✅ Tutte le tracce pronte! Premi Play';
+                }
+            }
+        }).connect(gain);
+        t.player=player; tracks.push(t);
+    });
+});
+
+// Play/Pausa/Stop
+async function startPlayers(offset){
+    await Tone.start();
+    tracks.forEach(t=>t.player.start(undefined, offset));
+    startTime=Tone.now()-offset; pausedTime=0; isPlaying=true;
+}
+function stopPlayers(){ tracks.forEach(t=>t.player.stop()); startTime=0; pausedTime=0; isPlaying=false; }
+function pausePlayers(){ pausedTime=Tone.now()-startTime; tracks.forEach(t=>t.player.stop()); isPlaying=false; }
+
+playBtn.addEventListener('click',()=>startPlayers(pausedTime||0));
+pauseBtn.addEventListener('click',pausePlayers);
+stopBtn.addEventListener('click',stopPlayers);
+
+back5Btn.addEventListener('click',()=>{ stopPlayers(); startPlayers(Math.max((Tone.now()-startTime)-5,0)); });
+fwd5Btn.addEventListener('click',()=>{ stopPlayers(); startPlayers(Math.min((Tone.now()-startTime)+5,duration)); });
+
+// Reset tempo/pitch
+tempoResetBtn.addEventListener('click',()=>{ tempoEl.value=100; updateTempoPitch(); });
+pitchResetBtn.addEventListener('click',()=>{ pitchEl.value=0; updateTempoPitch(); });
+
+// Tempo & Pitch
+function updateTempoPitch(){
+    const rate=Number(tempoEl.value)/100;
+    const pitchSemi=Number(pitchEl.value);
+    tempoValEl.textContent=Math.round(rate*100)+'%';
+    pitchValEl.textContent=pitchSemi.toFixed(1);
+    tracks.forEach(t=>{
+        t.player.playbackRate=rate;
+        t.player.detune=pitchSemi*100; // 100 cents per semitono
+    });
+}
+tempoEl.addEventListener('input',updateTempoPitch);
+pitchEl.addEventListener('input',updateTempoPitch);
+
+// Barra waveform interattiva
+let isDragging=false;
+waveHandle.addEventListener('mousedown',()=>{ isDragging=true; });
+document.addEventListener('mouseup',()=>{ isDragging=false; });
+document.addEventListener('mousemove',(e)=>{
+    if(!isDragging) return;
+    const rect=waveProgress.parentElement.getBoundingClientRect();
+    let pct=(e.clientX-rect.left)/rect.width; pct=Math.min(Math.max(pct,0),1);
+    stopPlayers(); startPlayers(pct*duration);
+});
+waveProgress.parentElement.addEventListener('click',(e)=>{
+    if(!isReady) return;
+    const rect=waveProgress.parentElement.getBoundingClientRect();
+    const pct=(e.clientX-rect.left)/rect.width;
+    stopPlayers(); startPlayers(pct*duration);
+});
+
+// Spaziatrice Play/Pausa
+document.addEventListener('keydown',e=>{
+    if(e.code==='Space'){ e.preventDefault(); if(isPlaying){ pausePlayers(); }else{ startPlayers(pausedTime||0); } }
+});
+
+// Aggiorna UI continuamente
+function updateWaveform(){
+    let current=pausedTime||(Tone.now()-startTime);
+    if(current>duration) current=duration;
+    const pct=duration?(current/duration)*100:0;
+    waveProgress.style.width=pct+'%';
+    waveHandle.style.left=pct+'%';
+    currentTimeEl.textContent=formatTime(current);
+    tracks.forEach(t=>{
+        if(t.player.state==='started'){ t.led.style.background='var(--active)'; }
+        else if(isPlaying){ t.led.style.background='var(--paused)'; }
+        else{ t.led.style.background='#334155'; }
+    });
+    rafId=requestAnimationFrame(updateWaveform);
+}
+requestAnimationFrame(updateWaveform);
+</script>
+</body>
+</html>
